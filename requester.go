@@ -198,6 +198,20 @@ func (b *Requester) runWorker(n int) {
 		throttle = time.Tick(time.Duration(1e6/(b.config.QPS)) * time.Microsecond)
 	}
 
+	reqNum := atomic.AddInt64(&b.reqCounter, 1)
+
+	ctd := newCallTemplateData(b.mtd, reqNum)
+
+	dataMap, err := ctd.executeData(b.data)
+	if err != nil {
+		return
+	}
+
+	_, streamInput, err := createPayloads(dataMap, b.mtd)
+	if err != nil {
+		return
+	}
+
 	for i := 0; i < n; i++ {
 		// Check if application is stopped. Do not send into a closed channel.
 		select {
@@ -208,22 +222,14 @@ func (b *Requester) runWorker(n int) {
 				<-throttle
 			}
 
-			b.makeRequest()
+			input := *streamInput
+			inputLen := len(input)
+			b.makeRequest(ctd, input[i%inputLen])
 		}
 	}
 }
 
-func (b *Requester) makeRequest() {
-
-	reqNum := atomic.AddInt64(&b.reqCounter, 1)
-
-	ctd := newCallTemplateData(b.mtd, reqNum)
-
-	dataMap, err := ctd.executeData(b.data)
-	if err != nil {
-		return
-	}
-
+func (b *Requester) makeRequest(ctd *callTemplateData, input *dynamic.Message) {
 	mdMap, err := ctd.executeMetadata(b.metadata)
 	if err != nil {
 		return
@@ -233,11 +239,6 @@ func (b *Requester) makeRequest() {
 	if mdMap != nil && len(*mdMap) > 0 {
 		md := metadata.New(*mdMap)
 		reqMD = &md
-	}
-
-	input, streamInput, err := createPayloads(dataMap, b.mtd)
-	if err != nil {
-		return
 	}
 
 	ctx := context.Background()
@@ -253,15 +254,7 @@ func (b *Requester) makeRequest() {
 		ctx = metadata.NewOutgoingContext(ctx, *reqMD)
 	}
 
-	if b.mtd.IsClientStreaming() && b.mtd.IsServerStreaming() {
-		b.makeBidiRequest(&ctx, streamInput)
-	} else if b.mtd.IsClientStreaming() {
-		b.makeClientStreamingRequest(&ctx, streamInput)
-	} else if b.mtd.IsServerStreaming() {
-		b.makeServerStreamingRequest(&ctx, input)
-	} else {
-		b.stub.InvokeRpc(ctx, b.mtd, input)
-	}
+	b.stub.InvokeRpc(ctx, b.mtd, input)
 }
 
 func (b *Requester) makeClientStreamingRequest(ctx *context.Context, input *[]*dynamic.Message) {
